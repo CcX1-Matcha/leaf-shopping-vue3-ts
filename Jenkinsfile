@@ -1,5 +1,5 @@
 // 小兔鲜商城 · CI/CD 流水线
-// 流程：拉代码 → 构建镜像（容器内编译前端）→ 部署 → 健康检查，失败自动回滚
+// 流程：拉代码 -> 备份当前镜像 -> 构建镜像 -> 部署 -> 容器内健康检查，失败自动回滚
 pipeline {
   agent any
 
@@ -10,9 +10,9 @@ pipeline {
   }
 
   environment {
-    IMAGE        = 'leaf-shopping-app'
+    IMAGE = 'leaf-shopping-app'
     PROJECT_NAME = 'leaf-shopping'
-    APP_PORT     = '8080'
+    APP_CONTAINER = 'leaf-app'
     NPM_REGISTRY = 'https://registry.npmmirror.com'
   }
 
@@ -28,6 +28,12 @@ pipeline {
       }
     }
 
+    stage('备份当前镜像') {
+      steps {
+        sh 'docker tag $IMAGE:latest $IMAGE:previous 2>/dev/null || echo "首次构建，没有可备份的镜像"'
+      }
+    }
+
     stage('构建镜像') {
       steps {
         sh 'docker build -f Dockerfile.build --build-arg NPM_REGISTRY=$NPM_REGISTRY -t $IMAGE:$BUILD_NUMBER -t $IMAGE:latest .'
@@ -36,7 +42,6 @@ pipeline {
 
     stage('部署') {
       steps {
-        sh 'docker tag $IMAGE:latest $IMAGE:previous 2>/dev/null || true'
         sh 'docker compose -p $PROJECT_NAME up -d --force-recreate --no-build'
       }
     }
@@ -44,17 +49,19 @@ pipeline {
     stage('健康检查') {
       steps {
         sh '''
+          # 注意：要在【容器内部】探测。Jenkins 容器里的 127.0.0.1:8080 是它自己，连不到宿主机
           for i in $(seq 1 20); do
-            if curl -fsS "http://127.0.0.1:$APP_PORT/" >/dev/null 2>&1; then
+            if docker exec $APP_CONTAINER wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1; then
               echo "健康检查通过（第 $i 次尝试）"
-              curl -s -o /dev/null -w "指标接口 HTTP: %{http_code}" "http://127.0.0.1:$APP_PORT/metrics"
-              echo
+              echo "指标接口返回："
+              docker exec $APP_CONTAINER wget -qO- http://127.0.0.1:3000/metrics | head -3
               exit 0
             fi
             echo "第 $i 次未就绪，等 3 秒"
             sleep 3
           done
-          echo "健康检查失败"
+          echo "健康检查失败，应用容器日志："
+          docker logs $APP_CONTAINER --tail 30
           exit 1
         '''
       }
@@ -70,7 +77,7 @@ pipeline {
           docker compose -p $PROJECT_NAME up -d --force-recreate --no-build
           echo "已回滚到上一个版本"
         else
-          echo "没有可回滚的镜像（首次构建），跳过"
+          echo "没有可回滚的镜像，跳过"
         fi
       '''
     }
