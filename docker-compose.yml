@@ -1,41 +1,40 @@
 services:
-  api:
+  app:
     build:
       context: .
       dockerfile: Dockerfile
-      target: api
-    image: leaf-shopping-api:latest
-    container_name: leaf-api
+      # 前端源码改了要在服务器上重建时，把上面一行换成 Dockerfile.build
+      args:
+        INSTALL_DEPS: "${INSTALL_DEPS:-1}"
+    image: leaf-shopping-app:latest
+    container_name: leaf-app
     restart: unless-stopped
     environment:
       PORT: 3000
       TZ: Asia/Shanghai
+      STATIC_DIR: /app/web
+      # ---- 存储：json（默认，容器内文件）或 mysql ----
+      DB_DRIVER: "${DB_DRIVER:-json}"
+      MYSQL_HOST: "${MYSQL_HOST:-host.docker.internal}"
+      MYSQL_PORT: "${MYSQL_PORT:-3306}"
+      MYSQL_USER: "${MYSQL_USER:-root}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-leaf_shopping}"
+    # 让容器能用 host.docker.internal 访问【宿主机上】的 MySQL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      # 订单/购物车/地址等数据持久化，容器重建不丢
+      # json 模式下订单/购物车/地址数据存在这个卷里
       - leaf-data:/app/data
+    ports:
+      # 左边是宿主机端口，想用 80 就改成 "80:3000"
+      - "8080:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
-    # 需要直连后端调试时打开（浏览器访问 http://服务器IP:3000）
-    # ports:
-    #   - "3000:3000"
-
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: web
-    image: leaf-shopping-web:latest
-    container_name: leaf-web
-    restart: unless-stopped
-    depends_on:
-      - api
-    ports:
-      # 左边是宿主机端口，想用 80 就改成 "80:80"
-      - "8080:80"
 
 volumes:
   leaf-data:

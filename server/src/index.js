@@ -10,6 +10,7 @@
  *   失败 { code, msg, message, result: null }
  */
 import http from 'node:http'
+import v8 from 'node:v8'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,104 +20,34 @@ import { categories, cat1Map, cat2Map, goodsMap, findSku, getGoodsDetail, simple
 import { banners } from './data/banners.js'
 import { provinceList, cityList, areaList, lookupLocation } from './data/district.js'
 import { renderSvg } from './svg.js'
+import { createStore } from './store/index.js'
+import { buildOrder, fmtTime, parseTs } from './store/seed.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const DATA_DIR = path.join(__dirname, '..', 'data')
-const DB_FILE = path.join(DATA_DIR, 'db.json')
 const PORT = Number(process.env.PORT || 3000)
 
-// ================= 通用工具 =================
-const pad = (n) => String(n).padStart(2, '0')
-const fmtTime = (ts) => {
-  const d = new Date(ts)
-  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
-}
-const parseTs = (s) => new Date(String(s).replace(' ', 'T')).getTime()
-
-let db = null
-
-function saveDb() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true })
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2))
-  } catch (e) {
-    console.warn('[db] 写入失败，本次运行将以内存模式继续:', e.message)
-  }
-}
+// ================= 存储层（DB_DRIVER=json 用 data/db.json，DB_DRIVER=mysql 用 MySQL） =================
+const store = await createStore()
+const storeInfo = await store.init()
 
 // ================= 订单 =================
-function makeOrder(d, userId, addressId, goodsList, opts = {}) {
-  const address = (d.addresses[userId] || []).find((a) => a.id === addressId)
+async function makeOrder(user, addressId, goodsList, opts = {}) {
+  const address = await store.findAddress(user.id, addressId)
   if (!address) return { error: '收货地址不存在' }
   if (!goodsList || !goodsList.length) return { error: '请选择要结算的商品' }
-  const now = Date.now()
-  const skus = []
-  let totalMoney = 0
-  let totalNum = 0
-  for (const item of goodsList) {
-    const found = findSku(item.skuId)
-    if (!found) return { error: '商品 ' + item.skuId + ' 不存在或已下架' }
-    const { goods: g, sku } = found
-    const quantity = Math.min(99, Math.max(1, Number(item.count) || 1))
-    const realPay = Number((Number(sku.price) * quantity).toFixed(2))
-    totalMoney += realPay
-    totalNum += quantity
-    skus.push({
-      id: sku.id,
-      name: g.name,
-      image: g.picture,
-      attrsText: sku.specs.map((s) => s.name + ':' + s.valueName).join(' '),
-      properties: sku.specs.map((s) => ({ propertyMainName: s.name, propertyValueName: s.valueName })),
-      quantity,
-      curPrice: Number(sku.oldPrice),
-      realPay,
-      spuId: g.id
-    })
-  }
-  const postFee = 6
-  totalMoney = Number((totalMoney + postFee).toFixed(2))
-  d.seq.order += 1
-  const id = String(now) + String(d.seq.order % 1000).padStart(3, '0')
-  const order = {
-    id,
-    createTime: fmtTime(now),
-    closeTime: fmtTime(now + 30 * 60 * 1000),
-    payLatestTime: fmtTime(now + 30 * 60 * 1000),
-    payTime: null,
-    endTime: null,
-    consignTime: null,
-    evaluationTime: null,
-    orderState: 1,
-    payState: 0,
-    payType: opts.payType ?? 1,
-    payChannel: opts.payChannel ?? 1,
-    deliveryTimeType: opts.deliveryTimeType ?? 1,
-    buyerMessage: opts.buyerMessage || '',
-    address: {
-      receiver: address.receiver,
-      contact: address.contact,
-      fullLocation: address.fullLocation,
-      receiverAddress: address.address,
-      provinceCode: address.provinceCode,
-      cityCode: address.cityCode,
-      countyCode: address.countyCode
-    },
-    postFee,
-    totalMoney,
-    totalNum,
-    skus
-  }
-  return { order }
+  const seq = await store.nextOrderSeq()
+  const id = String(Date.now()) + String(seq % 1000).padStart(3, '0')
+  return buildOrder(id, address, goodsList, opts)
 }
 
-function toOrderDetail(o) {
+async function toOrderDetail(o) {
   const now = Date.now()
   // 待付款订单超时自动取消
   if (o.orderState === 1 && parseTs(o.payLatestTime) - now <= 0) {
     o.orderState = 6
     o.payState = 0
     o.closeTime = o.payLatestTime
-    saveDb()
+    await store.updateOrder(o)
   }
   const countdown = o.orderState === 1 ? Math.max(0, Math.floor((parseTs(o.payLatestTime) - now) / 1000)) : -1
   return {
@@ -149,97 +80,82 @@ function toOrderDetail(o) {
   }
 }
 
-// ================= 演示数据 =================
-function seedDb() {
-  const d = { seq: { order: 0, address: 0, user: 1000 }, users: [], carts: {}, addresses: {}, orders: {} }
-  const u1 = {
-    id: 'u1',
-    account: 'xiaotuxian001',
-    password: '123456',
-    nickname: '小兔鲜儿',
-    avatar: '/img/avatar/兔.svg',
-    gender: '男',
-    mobile: '13800138000',
-    token: ''
-  }
-  d.users.push(u1)
-  d.addresses.u1 = [
-    { id: 'a1', receiver: '张三', contact: '13800138000', provinceCode: '440000', cityCode: '440100', countyCode: '440106', address: '天河区体育西路123号6栋601室', isDefault: 0, fullLocation: '广东省 广州市 天河区', postalCode: null, addressTags: null },
-    { id: 'a2', receiver: '李四', contact: '13900139000', provinceCode: '330000', cityCode: '330100', countyCode: '330106', address: '西湖区文三路100号3单元202室', isDefault: 1, fullLocation: '浙江省 杭州市 西湖区', postalCode: null, addressTags: null }
-  ]
-  d.carts.u1 = []
-
-  const now = Date.now()
-  const H = 3600 * 1000
-  const D = 24 * H
-
-  // 待付款
-  const { order: o1 } = makeOrder(d, 'u1', 'a1', [
-    { skuId: 'g2001-sku1', count: 2 },
-    { skuId: 'g2002-sku1', count: 1 }
-  ])
-  o1.createTime = fmtTime(now - 2 * 60 * 1000)
-
-  // 待发货
-  const { order: o2 } = makeOrder(d, 'u1', 'a2', [{ skuId: 'g3001-sku2', count: 2 }], { buyerMessage: '请发顺丰快递' })
-  o2.orderState = 2
-  o2.payState = 1
-  o2.createTime = fmtTime(now - 1 * D)
-  o2.payTime = fmtTime(now - 1 * D + 5 * 60 * 1000)
-  o2.payLatestTime = fmtTime(now - 1 * D + 30 * 60 * 1000)
-  o2.closeTime = null
-  o2.consignTime = fmtTime(now - 12 * H)
-
-  // 待收货
-  const { order: o3 } = makeOrder(d, 'u1', 'a1', [{ skuId: 'g5001-sku2', count: 1 }])
-  o3.orderState = 3
-  o3.payState = 1
-  o3.createTime = fmtTime(now - 2 * D)
-  o3.payTime = fmtTime(now - 2 * D + 10 * 60 * 1000)
-  o3.payLatestTime = fmtTime(now - 2 * D + 30 * 60 * 1000)
-  o3.closeTime = null
-  o3.consignTime = fmtTime(now - 1 * D - 12 * H)
-
-  // 已完成
-  const { order: o4 } = makeOrder(d, 'u1', 'a2', [
-    { skuId: 'g6001-sku3', count: 1 },
-    { skuId: 'g1007-sku1', count: 2 }
-  ])
-  o4.orderState = 5
-  o4.payState = 1
-  o4.createTime = fmtTime(now - 5 * D)
-  o4.payTime = fmtTime(now - 5 * D + 8 * 60 * 1000)
-  o4.payLatestTime = fmtTime(now - 5 * D + 30 * 60 * 1000)
-  o4.closeTime = null
-  o4.consignTime = fmtTime(now - 4 * D - 12 * H)
-  o4.endTime = fmtTime(now - 3 * D)
-  o4.evaluationTime = fmtTime(now - 3 * D + 2 * H)
-
-  // 已取消
-  const { order: o5 } = makeOrder(d, 'u1', 'a1', [{ skuId: 'g3004-sku1', count: 1 }])
-  o5.orderState = 6
-  o5.payState = 0
-  o5.createTime = fmtTime(now - 1 * D)
-  o5.closeTime = fmtTime(now - 1 * D + 30 * 60 * 1000)
-  o5.payLatestTime = o5.closeTime
-
-  d.orders.u1 = [o1, o5, o2, o3, o4]
-  return d
+// ================= 监控指标（Prometheus 文本格式，零依赖） =================
+const metrics = {
+  requests: new Map(),   // method|route|status -> 次数
+  durations: new Map(),  // method|route -> { sum, count }
+  startedAt: Date.now()
 }
 
-function loadDb() {
-  if (fs.existsSync(DB_FILE)) {
-    try {
-      db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))
-    } catch (e) {
-      console.warn('[db] 数据文件解析失败，将重新初始化:', e.message)
-      db = null
-    }
+function recordRequest(route, method, status, seconds) {
+  const rk = method + '|' + route + '|' + status
+  metrics.requests.set(rk, (metrics.requests.get(rk) || 0) + 1)
+  const dk = method + '|' + route
+  const d = metrics.durations.get(dk) || { sum: 0, count: 0 }
+  d.sum += seconds
+  d.count += 1
+  metrics.durations.set(dk, d)
+}
+
+const mLabel = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
+
+async function renderMetrics() {
+  const out = []
+  const header = (name, type, desc) => {
+    out.push('# HELP ' + name + ' ' + desc)
+    out.push('# TYPE ' + name + ' ' + type)
   }
-  if (!db) {
-    db = seedDb()
-    saveDb()
+
+  header('leaf_up', 'gauge', '服务是否存活（1=存活）')
+  out.push('leaf_up 1')
+
+  header('leaf_process_uptime_seconds', 'counter', '进程运行时长（秒）')
+  out.push('leaf_process_uptime_seconds ' + ((Date.now() - metrics.startedAt) / 1000).toFixed(0))
+
+  const mem = process.memoryUsage()
+  header('leaf_process_memory_bytes', 'gauge', '进程内存占用（字节）')
+  out.push('leaf_process_memory_bytes{type="rss"} ' + mem.rss)
+  out.push('leaf_process_memory_bytes{type="heap_used"} ' + mem.heapUsed)
+  out.push('leaf_process_memory_bytes{type="heap_total"} ' + mem.heapTotal)
+
+  header('leaf_nodejs_heap_limit_bytes', 'gauge', 'V8 堆上限（字节）')
+  out.push('leaf_nodejs_heap_limit_bytes ' + (v8.getHeapStatistics().heap_size_limit || 0))
+
+  header('leaf_http_requests_total', 'counter', 'HTTP 请求总数')
+  for (const [k, v] of metrics.requests) {
+    const parts = k.split('|')
+    out.push('leaf_http_requests_total{method="' + mLabel(parts[0]) + '",route="' + mLabel(parts[1]) + '",status="' + mLabel(parts[2]) + '"} ' + v)
   }
+
+  header('leaf_http_request_duration_seconds_sum', 'counter', 'HTTP 请求耗时累计（秒）')
+  for (const [k, d] of metrics.durations) {
+    const parts = k.split('|')
+    out.push('leaf_http_request_duration_seconds_sum{method="' + mLabel(parts[0]) + '",route="' + mLabel(parts[1]) + '"} ' + d.sum.toFixed(6))
+  }
+  header('leaf_http_request_duration_seconds_count', 'counter', 'HTTP 请求次数（用于算平均耗时）')
+  for (const [k, d] of metrics.durations) {
+    const parts = k.split('|')
+    out.push('leaf_http_request_duration_seconds_count{method="' + mLabel(parts[0]) + '",route="' + mLabel(parts[1]) + '"} ' + d.count)
+  }
+
+  try {
+    const s = await store.stats()
+    header('leaf_users_total', 'gauge', '用户总数')
+    out.push('leaf_users_total ' + s.users)
+    header('leaf_addresses_total', 'gauge', '收货地址总数')
+    out.push('leaf_addresses_total ' + s.addresses)
+    header('leaf_cart_items_total', 'gauge', '购物车商品项总数')
+    out.push('leaf_cart_items_total ' + s.carts)
+    header('leaf_orders_total', 'gauge', '订单总数')
+    out.push('leaf_orders_total ' + s.orders)
+  } catch (e) {
+    out.push('# 读取业务数据失败: ' + mLabel(e.message))
+  }
+
+  header('leaf_products_total', 'gauge', '商品总数')
+  out.push('leaf_products_total ' + goodsList.length)
+
+  return out.join('\n') + '\n'
 }
 
 // ================= HTTP 基础 =================
@@ -287,10 +203,10 @@ function readBody(req) {
   })
 }
 
-function requireUser(req) {
+async function requireUser(req) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
   if (!token) return null
-  return db.users.find((u) => u.token === token) || null
+  return store.findUserByToken(token)
 }
 
 function toCartItem(g, sku, count) {
@@ -322,7 +238,7 @@ function addRoute(method, pattern, handler) {
     keys.push(m.slice(1))
     return '([^/]+)'
   }) + '/?$'
-  routes.push({ method, re: new RegExp(re), keys, handler })
+  routes.push({ method, pattern, re: new RegExp(re), keys, handler })
 }
 
 const LANDING_HTML = [
@@ -376,12 +292,14 @@ const LANDING_HTML = [
 
 // ---------- 根页面 ----------
 addRoute('GET', '/', (req, res) => {
+  if (tryStatic(res, '/')) return
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.writeHead(200)
   res.end(LANDING_HTML)
 })
 
 addRoute('GET', '/favicon.ico', (req, res) => {
+  if (tryStatic(res, '/favicon.ico')) return
   res.writeHead(204)
   res.end()
 })
@@ -399,6 +317,48 @@ function findLocalImage() {
     if (fs.existsSync(file)) return { file, ext }
   }
   return null
+}
+
+// ---------- 前端静态页面（单容器部署时由后端一并提供，不再需要 nginx） ----------
+// 目录可用环境变量 STATIC_DIR 指定，默认 ./web（Docker 里的 /app/web）
+const STATIC_DIR = process.env.STATIC_DIR || path.join(__dirname, '..', 'web')
+const STATIC_INDEX = path.join(STATIC_DIR, 'index.html')
+const HAS_STATIC = fs.existsSync(STATIC_INDEX)
+const STATIC_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json; charset=utf-8'
+}
+
+function tryStatic(res, pathname) {
+  if (!HAS_STATIC) return false
+  let file = path.normalize(path.join(STATIC_DIR, pathname))
+  if (!file.startsWith(STATIC_DIR)) return false // 防目录穿越
+  let isIndex = false
+  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+    file = STATIC_INDEX // 单页应用：找不到的路径回退 index.html
+    isIndex = true
+  }
+  const ext = path.extname(file).toLowerCase()
+  res.setHeader('Content-Type', STATIC_MIME[ext] || 'application/octet-stream')
+  if (isIndex) res.setHeader('Cache-Control', 'no-cache')
+  else if (pathname.startsWith('/assets/')) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  res.writeHead(200)
+  res.end(fs.readFileSync(file))
+  return true
 }
 
 function sendImageFile(res, found) {
@@ -453,20 +413,27 @@ addRoute('GET', '/img/:kind/:file', (req, res, params, url) => {
   res.end(svg)
 })
 
+// ---------- 监控指标（Prometheus 抓取用） ----------
+addRoute('GET', '/metrics', async (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+  res.writeHead(200)
+  res.end(await renderMetrics())
+})
+
 // ---------- 登录 ----------
 addRoute('POST', '/login', async (req, res) => {
   const body = await readBody(req)
   const account = String(body.account || '').trim()
   const password = String(body.password || '')
   if (!account || !password) return fail(req, res, '请输入账号和密码', '500')
-  let user = db.users.find((u) => u.account === account)
+  let user = await store.findUserByAccount(account)
   if (user) {
     if (user.password !== password) return fail(req, res, '账号或密码错误', '501')
   } else {
     // 自动注册
-    db.seq.user += 1
+    const seq = await store.nextUserSeq()
     user = {
-      id: 'u' + db.seq.user,
+      id: 'u' + seq,
       account,
       password,
       nickname: account,
@@ -475,14 +442,11 @@ addRoute('POST', '/login', async (req, res) => {
       mobile: '',
       token: ''
     }
-    db.users.push(user)
-    db.carts[user.id] = []
-    db.addresses[user.id] = []
-    db.orders[user.id] = []
+    await store.createUser(user)
   }
   if (!user.token) {
     user.token = crypto.randomUUID()
-    saveDb()
+    await store.updateUserToken(user.id, user.token)
   }
   ok(req, res, {
     id: user.id,
@@ -663,72 +627,64 @@ addRoute('GET', '/goods/relevant', (req, res, params, url) => {
 })
 
 // ---------- 购物车 ----------
-addRoute('GET', '/member/cart', (req, res) => {
-  const user = requireUser(req)
+addRoute('GET', '/member/cart', async (req, res) => {
+  const user = await requireUser(req)
   // 未登录时返回空购物车，避免顶部购物车组件在游客页面报错
   if (!user) return ok(req, res, [])
-  ok(req, res, db.carts[user.id] || [])
+  ok(req, res, await store.listCart(user.id))
 })
 
 addRoute('POST', '/member/cart', async (req, res) => {
-  const user = requireUser(req)
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const body = await readBody(req)
   const found = findSku(body.skuId)
   if (!found) return fail(req, res, '商品不存在', '500')
-  const cart = (db.carts[user.id] = db.carts[user.id] || [])
   const count = Math.max(1, Number(body.count) || 1)
-  const exist = cart.find((i) => i.skuId === found.sku.id)
+  const exist = await store.findCartItem(user.id, found.sku.id)
   let item
   if (exist) {
-    exist.count = Math.min(100, exist.count + count)
-    item = exist
+    item = await store.updateCartItemCount(user.id, found.sku.id, Math.min(100, exist.count + count))
   } else {
     item = toCartItem(found.goods, found.sku, count)
-    cart.push(item)
+    await store.insertCartItem(user.id, item)
   }
-  saveDb()
   ok(req, res, item)
 })
 
 addRoute('DELETE', '/member/cart', async (req, res) => {
-  const user = requireUser(req)
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const body = await readBody(req)
   const ids = Array.isArray(body.ids) ? body.ids : []
-  db.carts[user.id] = (db.carts[user.id] || []).filter((i) => !ids.includes(i.skuId))
-  saveDb()
+  await store.deleteCartItems(user.id, ids)
   ok(req, res, null)
 })
 
 addRoute('PUT', '/member/cart/selected', async (req, res) => {
-  const user = requireUser(req)
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const body = await readBody(req)
   const ids = Array.isArray(body.ids) ? body.ids : []
-  for (const i of db.carts[user.id] || []) {
-    if (ids.includes(i.skuId)) i.selected = !!body.selected
-  }
-  saveDb()
+  await store.updateCartSelected(user.id, ids, !!body.selected)
   ok(req, res, null)
 })
 
 addRoute('PUT', '/member/cart/:id', async (req, res, params) => {
-  const user = requireUser(req)
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const body = await readBody(req)
-  const item = (db.carts[user.id] || []).find((i) => i.skuId === params.id)
-  if (!item) return fail(req, res, '购物车中不存在该商品', '500')
-  item.count = Math.min(100, Math.max(1, Number(body.count) || 1))
-  saveDb()
+  const exist = await store.findCartItem(user.id, params.id)
+  if (!exist) return fail(req, res, '购物车中不存在该商品', '500')
+  const item = await store.updateCartItemCount(user.id, params.id, Math.min(100, Math.max(1, Number(body.count) || 1)))
   ok(req, res, item)
 })
 
 // ---------- 结算 / 订单 ----------
-addRoute('GET', '/member/order/pre', (req, res) => {
-  const user = requireUser(req)
+addRoute('GET', '/member/order/pre', async (req, res) => {
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
-  const cart = (db.carts[user.id] || []).filter((i) => i.selected)
+  const cart = (await store.listCart(user.id)).filter((i) => i.selected)
   const goods = cart.map((i) => ({
     id: i.skuId,
     name: i.name,
@@ -748,59 +704,53 @@ addRoute('GET', '/member/order/pre', (req, res) => {
     postFee: 6,
     discountPrice: 0
   }
-  ok(req, res, { userAddresses: db.addresses[user.id] || [], goods, summary })
+  ok(req, res, { userAddresses: await store.listAddresses(user.id), goods, summary })
 })
 
 addRoute('POST', '/member/order', async (req, res) => {
-  const user = requireUser(req)
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const body = await readBody(req)
-  const { order, error } = makeOrder(db, user.id, body.addressId, body.goods, body)
+  const { order, error } = await makeOrder(user, body.addressId, body.goods, body)
   if (error) return fail(req, res, error, '500')
-  db.orders[user.id] = db.orders[user.id] || []
-  db.orders[user.id].unshift(order)
+  await store.insertOrder(user.id, order)
   const ids = (body.goods || []).map((g) => g.skuId)
-  db.carts[user.id] = (db.carts[user.id] || []).filter((i) => !ids.includes(i.skuId))
-  saveDb()
+  await store.deleteCartItems(user.id, ids)
   ok(req, res, { id: order.id })
 })
 
-addRoute('GET', '/member/order', (req, res, params, url) => {
-  const user = requireUser(req)
+addRoute('GET', '/member/order', async (req, res, params, url) => {
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const state = Number(url.searchParams.get('orderState')) || 0
   const page = Math.max(1, Number(url.searchParams.get('page')) || 1)
   const pageSize = Math.min(20, Math.max(1, Number(url.searchParams.get('pageSize')) || 2))
-  let list = db.orders[user.id] || []
-  if (state) list = list.filter((o) => o.orderState === state)
-  list = [...list].sort((a, b) => parseTs(b.createTime) - parseTs(a.createTime))
-  const counts = list.length
+  const { counts, items: raw } = await store.listOrders(user.id, { state, page, pageSize })
   const pages = Math.max(1, Math.ceil(counts / pageSize))
-  const items = list.slice((page - 1) * pageSize, page * pageSize).map((o) => toOrderDetail(o))
+  const items = []
+  for (const o of raw) items.push(await toOrderDetail(o))
   ok(req, res, { counts, pageSize, pages, page, items })
 })
 
-addRoute('GET', '/member/order/:id', (req, res, params) => {
-  const user = requireUser(req)
+addRoute('GET', '/member/order/:id', async (req, res, params) => {
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
-  const order = (db.orders[user.id] || []).find((o) => o.id === params.id)
+  const order = await store.findOrder(user.id, params.id)
   if (!order) return fail(req, res, '订单不存在', '500')
-  ok(req, res, toOrderDetail(order))
+  ok(req, res, await toOrderDetail(order))
 })
 
 // ---------- 收货地址 ----------
-addRoute('GET', '/member/address', (req, res) => {
-  const user = requireUser(req)
+addRoute('GET', '/member/address', async (req, res) => {
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
-  const list = db.addresses[user.id] || []
-  ok(req, res, [...list].sort((a, b) => a.isDefault - b.isDefault))
+  ok(req, res, await store.listAddresses(user.id))
 })
 
 addRoute('POST', '/member/address', async (req, res) => {
-  const user = requireUser(req)
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const body = await readBody(req)
-  const list = (db.addresses[user.id] = db.addresses[user.id] || [])
   const item = {
     id: 'a' + Date.now(),
     receiver: body.receiver || '',
@@ -814,20 +764,18 @@ addRoute('POST', '/member/address', async (req, res) => {
     postalCode: body.postalCode || null,
     addressTags: body.addressTags || null
   }
-  if (item.isDefault === 0) for (const a of list) a.isDefault = 1
-  list.push(item)
-  saveDb()
+  await store.insertAddress(user.id, item)
+  if (item.isDefault === 0) await store.setDefaultAddress(user.id, item.id)
   ok(req, res, item)
 })
 
 addRoute('PUT', '/member/address/:id', async (req, res, params) => {
-  const user = requireUser(req)
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
   const body = await readBody(req)
-  const list = db.addresses[user.id] || []
-  const item = list.find((a) => a.id === params.id)
+  const item = await store.findAddress(user.id, params.id)
   if (!item) return fail(req, res, '地址不存在', '500')
-  Object.assign(item, {
+  const updated = await store.updateAddress(user.id, params.id, {
     receiver: body.receiver ?? item.receiver,
     contact: body.contact ?? item.contact,
     provinceCode: body.provinceCode ?? item.provinceCode,
@@ -839,37 +787,31 @@ addRoute('PUT', '/member/address/:id', async (req, res, params) => {
     postalCode: body.postalCode ?? item.postalCode,
     addressTags: body.addressTags ?? item.addressTags
   })
-  if (item.isDefault === 0) for (const a of list) if (a.id !== item.id) a.isDefault = 1
-  saveDb()
-  ok(req, res, item)
+  if (updated.isDefault === 0) await store.setDefaultAddress(user.id, params.id)
+  ok(req, res, updated)
 })
 
-addRoute('DELETE', '/member/address/:id', (req, res, params) => {
-  const user = requireUser(req)
+addRoute('DELETE', '/member/address/:id', async (req, res, params) => {
+  const user = await requireUser(req)
   if (!user) return fail(req, res, '请先登录', '401', 401)
-  const list = db.addresses[user.id] || []
-  db.addresses[user.id] = list.filter((a) => a.id !== params.id)
-  saveDb()
+  await store.deleteAddress(user.id, params.id)
   ok(req, res, null)
 })
 
 // ---------- 支付（模拟支付宝） ----------
-addRoute('GET', '/pay/aliPay', (req, res, params, url) => {
+addRoute('GET', '/pay/aliPay', async (req, res, params, url) => {
   const orderId = url.searchParams.get('orderId')
   const redirect = url.searchParams.get('redirect')
   let paid = false
-  for (const list of Object.values(db.orders)) {
-    const order = list.find((o) => o.id === orderId)
-    if (order) {
-      if (order.orderState === 1) {
-        order.orderState = 2
-        order.payState = 1
-        order.payTime = fmtTime(Date.now())
-        saveDb()
-      }
-      paid = true
-      break
+  const order = orderId ? await store.findOrderAnyUser(orderId) : null
+  if (order) {
+    if (order.orderState === 1) {
+      order.orderState = 2
+      order.payState = 1
+      order.payTime = fmtTime(Date.now())
+      await store.updateOrder(order)
     }
+    paid = true
   }
   const target = redirect ? decodeURIComponent(redirect) : null
   const query = 'orderId=' + encodeURIComponent(orderId || '') + '&payResult=' + (paid ? 'true' : 'false')
@@ -898,7 +840,6 @@ addRoute('GET', '/district/area', (req, res, params, url) => {
 })
 
 // ================= 启动 =================
-loadDb()
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
@@ -924,13 +865,24 @@ const server = http.createServer(async (req, res) => {
     /* 忽略解码错误 */
   }
   const method = (req.method || 'GET').toUpperCase()
+  const startedAt = process.hrtime.bigint()
+  let metricRoute = 'unmatched'
+  res.on('finish', () => {
+    const seconds = Number(process.hrtime.bigint() - startedAt) / 1e9
+    recordRequest(metricRoute, method, res.statusCode, seconds)
+  })
 
   const route = routes.find((r) => r.method === method && r.re.test(pathname))
   if (!route) {
+    if ((method === 'GET' || method === 'HEAD') && tryStatic(res, pathname)) {
+      console.log('[' + new Date().toLocaleTimeString() + '] ' + method + ' ' + pathname + ' -> 200 (静态页面)')
+      return
+    }
     fail(req, res, '接口不存在: ' + method + ' ' + pathname, '404', 404)
     console.log('[' + new Date().toLocaleTimeString() + '] ' + method + ' ' + pathname + ' -> 404')
     return
   }
+  metricRoute = route.pattern
   const params = {}
   const m = pathname.match(route.re)
   route.keys.forEach((k, i) => {
@@ -959,8 +911,7 @@ server.on('error', (e) => {
 })
 
 process.on('SIGINT', () => {
-  saveDb()
-  process.exit(0)
+  store.close().finally(() => process.exit(0))
 })
 
 server.listen(PORT, () => {
@@ -969,6 +920,9 @@ server.listen(PORT, () => {
   console.log(' 接口地址: http://localhost:' + PORT)
   console.log(' 接口一览: http://localhost:' + PORT + '/')
   console.log(' 演示账号: xiaotuxian001 / 123456')
-  console.log(' 数据文件: ' + DB_FILE)
+  console.log(' 数据存储: ' + (store.driver === 'mysql'
+    ? 'MySQL ' + storeInfo.host + ':' + storeInfo.port + '/' + storeInfo.database
+    : 'JSON 文件 ' + storeInfo.file))
+  console.log(' 前端页面: ' + (HAS_STATIC ? STATIC_DIR : '未提供（仅接口，访问 / 看接口一览）'))
   console.log('==================================================')
 })

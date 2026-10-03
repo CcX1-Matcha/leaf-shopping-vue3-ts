@@ -1,0 +1,44 @@
+# 监控栈：Prometheus + Grafana + node-exporter
+# 用法： cd /opt/monitoring && docker compose up -d
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: leaf-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports: ["9090:9090"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 让容器能抓到宿主机 8080 上的应用
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: leaf-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123     # 登录后请立刻修改
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3001:3000"]
+    depends_on: [prometheus]
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: leaf-node-exporter
+    restart: unless-stopped
+    pid: host
+    volumes: ["/:/host:ro,rslave"]
+    command: ["--path.rootfs=/host"]
+    ports: ["9100:9100"]
+
+volumes:
+  prom-data:
+  grafana-data:

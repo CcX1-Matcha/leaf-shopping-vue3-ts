@@ -1,0 +1,28 @@
+# 备选：在前端源码改动后、想要在服务器上重新构建前端时使用
+# 默认走 npmmirror 国内源，避免 npm 拉包慢/失败
+#
+#   docker compose build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+#
+# 用法：把 docker-compose.yml 里的 dockerfile: Dockerfile 改成 Dockerfile.build
+
+FROM node:22-alpine AS builder
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+WORKDIR /build
+COPY package.json ./
+RUN npm install --no-audit --no-fund --registry=$NPM_REGISTRY
+COPY . .
+RUN rm -f .env .env.production .env.local && npm run build-only
+
+FROM node:22-alpine
+# 换阿里云 Alpine 源再装 tzdata（默认官方 CDN 在国内很慢）
+RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
+ && apk add --no-cache tzdata
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=3000 \
+    TZ=Asia/Shanghai \
+    STATIC_DIR=/app/web
+COPY server/ ./
+COPY --from=builder /build/dist ./web/
+EXPOSE 3000
+CMD ["node", "src/index.js"]

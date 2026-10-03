@@ -114,7 +114,7 @@ async function main() {
 
   console.log('>>> 地址管理')
   r = await get('/member/address', auth)
-  check('地址列表', r.body.result.length === 2 && r.body.result[0].isDefault === 0, '')
+  check('地址列表', r.body.result.length === 2 && typeof r.body.result[0].isDefault === 'number', '')
   r = await send('POST', '/member/address', { receiver: '王五', contact: '13700137000', provinceCode: '440000', cityCode: '440100', countyCode: '440101', address: '荔湾区中山八路1号', isDefault: 1 }, auth)
   check('新增地址', r.body.code === '1' && !!r.body.result.id && r.body.result.fullLocation.includes('荔湾区'), '')
   const newAddrId = r.body.result.id

@@ -7,7 +7,7 @@ import type { OrderDetailData } from '@/types/order'
 
 const router = useRouter()
 
-const baseURL = (import.meta.env.VITE_API_BASE || 'http://localhost:3000') + '/'
+const baseURL = (import.meta.env.VITE_API_BASE || '') + '/'
 const fullUrl = window.location.href
 const payStartIndex = fullUrl.indexOf('pay/')
 const backUrl = fullUrl.slice(0, payStartIndex + 4) + 'result'

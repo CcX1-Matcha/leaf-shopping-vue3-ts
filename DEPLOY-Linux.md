@@ -1,4 +1,6 @@
-# 部署到云 Linux 主机
+# 部署到云 Linux 主机（裸机方式）
+
+> 如果主机上跑 Docker，直接看 DEPLOY-Docker.md，一条 `docker compose up -d --build` 即可。
 
 ## 一、环境要求
 - Node.js 20.19+ 或 22.12+（推荐 22 LTS）：`node -v` 检查

@@ -2,7 +2,7 @@ import axios from 'axios'
 import router from '@/router'
 import { useUserStore } from '@/stores'
 
-const baseURL = import.meta.env.VITE_API_BASE || 'http://localhost:3000'
+const baseURL = import.meta.env.VITE_API_BASE || ''
 
 const instance = axios.create({
   baseURL,

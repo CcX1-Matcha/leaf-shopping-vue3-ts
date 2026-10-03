@@ -1,12 +1,12 @@
 node_modules
-dist
 .git
 .gitignore
 .husky
 .vscode
 *.zip
 *.log
-.env.local
+*.bak
+.env.buildbak
 DEPLOY-Linux.md
 DEPLOY-Docker.md
 README.md
