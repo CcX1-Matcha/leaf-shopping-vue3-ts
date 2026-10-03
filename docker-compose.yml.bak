@@ -1,0 +1,41 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    image: leaf-shopping-api:latest
+    container_name: leaf-api
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      TZ: Asia/Shanghai
+    volumes:
+      # 订单/购物车/地址等数据持久化，容器重建不丢
+      - leaf-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # 需要直连后端调试时打开（浏览器访问 http://服务器IP:3000）
+    # ports:
+    #   - "3000:3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    image: leaf-shopping-web:latest
+    container_name: leaf-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      # 左边是宿主机端口，想用 80 就改成 "80:80"
+      - "8080:80"
+
+volumes:
+  leaf-data:

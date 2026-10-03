@@ -1,0 +1,5 @@
+# pnpm 11 设置：允许这些依赖运行构建脚本
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  vue-demi: true

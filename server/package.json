@@ -1,0 +1,12 @@
+{
+  "name": "leaf-shopping-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "小兔鲜商城本地后端（零依赖 mock 服务）",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node test/e2e.test.mjs"
+  }
+}
