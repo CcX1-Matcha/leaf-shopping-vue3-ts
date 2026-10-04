@@ -1,6 +1,6 @@
 import request from '@/utils/request'
 export const addCartApi = (skuId: string, count: number) => {
-  return request.post('member/cart', {
+  return request.post('/member/cart', {
     skuId,
     count
   })
